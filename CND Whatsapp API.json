@@ -1,0 +1,4599 @@
+{
+  "name": "CND Whatsapp API",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// ========================================\n// CND ChatBot - Helpers con Dispatcher (sin this.getNodeParameter)\n// Code node: \"Lib: helpers\"\n// ========================================\n\n// ---------- Validación\nfunction isValidToken(token) { return /^[0-9]{8}$/.test(token); }\nfunction extractTokenCode(token) { return String(token || '').replace('#', ''); }\nfunction isSessionActive(lastSession) {\n  if (!lastSession) return false;\n  const diffMin = (Date.now() - new Date(lastSession).getTime()) / 60000;\n  return diffMin <= 20;\n}\n\n// ---------- Parsing\nfunction parseWhatsAppMessage(body) {\n  const value = body?.entry?.[0]?.changes?.[0]?.value ?? {};\n  const msg = value.messages ? value.messages[0] : {};\n  const contact = value.contacts ? value.contacts[0] : {};\n\n  const out = {\n    from: msg.from || contact.wa_id || \"\",\n    nombre: contact.profile ? contact.profile.name : \"\",\n    tipo: msg.type || \"\",\n    texto: \"\",\n    postbackText: \"\",\n    image_url: \"\",\n    image_caption: \"\",\n    payload_original: msg,\n    is_token_acceso: false,\n  };\n\n  if (msg.type === \"interactive\" && msg.interactive?.list_reply) {\n    out.texto = msg.interactive.list_reply.title || \"\";\n    try { out.postbackText = JSON.parse(msg.interactive.list_reply.id).postbackText || \"\"; }\n    catch { out.postbackText = msg.interactive.list_reply.id || \"\"; }\n  } else if (msg.type === \"interactive\" && msg.interactive?.button_reply) {\n    out.texto = msg.interactive.button_reply.title || \"\";\n    try { out.postbackText = JSON.parse(msg.interactive.button_reply.id).postbackText || \"\"; }\n    catch { out.postbackText = msg.interactive.button_reply.id || \"\"; }\n  } else if (msg.type === \"quick_reply\" && msg.quick_reply) {\n    out.texto = msg.quick_reply.title || \"\";\n    out.postbackText = msg.quick_reply.postbackText || \"\";\n  } else if (msg.type === \"text\" && msg.text) {\n    out.texto = msg.text.body;\n    const token = /^#[0-9]{8}$/.test(msg.text.body);\n    if (token) out.texto = msg.text.body.slice(1);\n    out.is_token_acceso = token;\n  } else if (msg.type === \"image\" && msg.image) {\n    out.image_url = msg.image.url;\n    out.image_caption = msg.image.caption || \"\";\n    out.texto = msg.image.caption || \"\";\n  } else if (msg.type === \"button\" && msg.button) {\n    out.postbackText = msg.button.text;\n  }\n  return out;\n}\n\n// ---------- Menús\nfunction buildQuickReplyMenu(msgid, header, text, caption, options) {\n  return { type: \"quick_reply\", msgid, content: { type: \"text\", header, text, caption }, options };\n}\nconst buildQuickReply = buildQuickReplyMenu;\n\nfunction buildListMenu(msgid, title, body, footer, globalButtons, items) {\n  return { type: \"list\", msgid, title, body, footer, globalButtons, items };\n}\nconst buildList = buildListMenu;\n\nfunction buildTicketOptions(tickets) {\n  return (tickets || []).map(t => ({\n    type: \"text\",\n    title: `Ticket #${t.id}`,\n    description: `${t.categoria || 'Sin categoría'} – ${t.state || 'Estado desconocido'}`,\n    postbackText: `ticket_${t.id}`,\n  }));\n}\n\n// ---------- Tickets\nfunction buildTicketStatus(ticket) {\n  const tecnico = ticket?.assigned_user?.full_name || \"No asignado\";\n  const estado = ticket?.state || \"Desconocido\";\n  const categoria = ticket?.categoria || \"Sin categoría\";\n  const descripcion = ticket?.descripcion || \"-\";\n  const fecha = ticket?.updatedAt || ticket?.fecha_actualizacion || \"-\";\n  const fechaStr = new Date(fecha).toLocaleString();\n  const texto =\n    `Categoría: *${categoria}*\\n` +\n    `Descripción: *${descripcion}*\\n` +\n    `Estado: *${estado}*\\n` +\n    `Técnico asignado: *${tecnico}*\\n` +\n    `Última actualización: *${fechaStr}*\\n\\n`;\n\n  return buildQuickReplyMenu(\n    `ticket-status-${ticket.id}`,\n    `Estado de tu ticket #${ticket.id}`,\n    texto,\n    \"CND Soporte\",\n    [\n      { type: \"text\", title: \"Agregar comentario\", postbackText: `ticket_action_comment_${ticket.id}` },\n      { type: \"text\", title: \"Menú principal\",     postbackText: \"main_menu\" },\n    ],\n  );\n}\n\nfunction buildTicketActionsMenu(ticketId) {\n  return buildQuickReplyMenu(\n    `ticket-actions-${ticketId}`,\n    `Gestión del Ticket #${ticketId}`,\n    \"¿Qué deseas hacer con este ticket?\",\n    \"CND Soporte\",\n    [\n      { type: \"text\", title: \"Consultar estado\", postbackText: `ticket_action_status_${ticketId}` },\n      { type: \"text\", title: \"Agregar comentario\", postbackText: `ticket_action_comment_${ticketId}` },\n      { type: \"text\", title: \"Menú principal\",     postbackText: \"main_menu\" },\n    ],\n  );\n}\n\n// ---------- CSAT\nfunction buildCSATMenu(ticketId) {\n  return {\n    type: \"list\",\n    msgid: `csat-stars-${ticketId}`,\n    title: `Califica Ticket #${ticketId}`,\n    body: \"¿Cómo calificarías la atención recibida?\",\n    footer: \"1 = Muy mala · 5 = Excelente\",\n    globalButtons: [{ type: \"text\", title: \"Calificar\" }],\n    items: [{\n      title: \"Opciones\",\n      subtitle: \"Selecciona una estrella\",\n      options: [\n        { type: \"text\", title: \"⭐ 1\", description: \"Muy mala\",    postbackText: `csat_1_${ticketId}` },\n        { type: \"text\", title: \"⭐ 2\", description: \"Mala\",        postbackText: `csat_2_${ticketId}` },\n        { type: \"text\", title: \"⭐ 3\", description: \"Aceptable\",   postbackText: `csat_3_${ticketId}` },\n        { type: \"text\", title: \"⭐ 4\", description: \"Buena\",       postbackText: `csat_4_${ticketId}` },\n        { type: \"text\", title: \"⭐ 5\", description: \"Excelente\",   postbackText: `csat_5_${ticketId}` },\n      ],\n    }],\n  };\n}\n\nfunction buildCSATCommentMenu(ticketId, score) {\n  return buildQuickReplyMenu(\n    `csat-comment-${ticketId}`,\n    \"¿Agregar comentario?\",\n    \"¿Quieres escribir un comentario adicional sobre el servicio?\",\n    \"Opcional\",\n    [\n      { type: \"text\", title: \"Sí\", postbackText: `csat_comment_yes_${ticketId}_${score}` },\n      { type: \"text\", title: \"No\", postbackText:  `csat_comment_no_${ticketId}_${score}` },\n    ],\n  );\n}\n\n// ---------- Utilidad\nfunction isWithinBusinessHours() {\n  const hour = parseInt(new Date().toLocaleTimeString(\"en-US\", { timeZone: \"America/Santo_Domingo\", hour12: false, hour: \"2-digit\" }));\n  return hour >= 8 && hour < 17;\n}\nfunction formatDate(date) {\n  return new Date(date).toLocaleString('es-ES', { timeZone: 'America/Santo_Domingo', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });\n}\nfunction extractTicketId(postbackText) { const m = String(postbackText||'').match(/ticket_(\\d+)/); return m ? m[1] : null; }\nfunction extractCSATScore(postbackText) { const m = String(postbackText||'').match(/csat_(\\d+)_/); return m ? parseInt(m[1]) : 1; }\nfunction trunc(text, max=100) { text = text || ''; return text.length > max ? text.substring(0, max) + '...' : text; }\nfunction sanitizePostback(text) { return String(text || '').replace(/[^a-zA-Z0-9_\\-]/g, '_').toLowerCase(); }\nfunction rateLimit(userId, action, limit=5, windowMs=60000) {\n  const now = Date.now(), key = `${userId}_${action}`;\n  if (!rateLimit.cache) rateLimit.cache = new Map();\n  const list = (rateLimit.cache.get(key) || []).filter(t => now - t < windowMs);\n  if (list.length >= limit) return false;\n  list.push(now); rateLimit.cache.set(key, list); return true;\n}\n\n// ---------- Dispatcher\nconst api = {\n  // Validación\n  isValidToken, extractTokenCode, isSessionActive,\n  // Parsing\n  parseWhatsAppMessage,\n  // Menús\n  buildQuickReplyMenu, buildListMenu, buildTicketOptions, buildQuickReply, buildList,\n  // Tickets\n  buildTicketStatus, buildTicketActionsMenu,\n  // CSAT\n  buildCSATMenu, buildCSATCommentMenu,\n  // Utilidad\n  isWithinBusinessHours, formatDate, extractTicketId, extractCSATScore, trunc, sanitizePostback, rateLimit,\n};\n\nfunction callOne(payload = {}) {\n  const fn = payload.fn;\n  const args = payload.args ?? [];\n  if (!fn) return { ok: true, available: Object.keys(api).sort() };\n  if (!api[fn]) return { ok: false, error: `Función no encontrada: ${fn}` };\n  try {\n    const res = Array.isArray(args) ? api[fn](...args) : api[fn](args);\n    return { ok: true, fn, result: res };\n  } catch (e) {\n    return { ok: false, fn, error: String(e?.message || e) };\n  }\n}\n\nconst items = $input.all();\n\n// Soporta batch dentro de un solo item: { batch: [ {fn,args}, ... ] }\nif (items.length === 1 && Array.isArray(items[0]?.json?.batch)) {\n  const results = items[0].json.batch.map(callOne);\n  return results.map(r => ({ json: r }));\n}\n\n// Caso normal: procesa item a item (cada uno trae {fn,args})\nreturn items.map(it => ({ json: callOne(it.json) }));\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4368,
+        4048
+      ],
+      "id": "5b2b8f98-4ba6-4d6c-b772-c105332b20d9",
+      "name": "Lib: helpers"
+    },
+    {
+      "parameters": {
+        "jsCode": "// --- Configuración ---\nlet ticket = $input.first().json.data; // ← Aquí pones el id que buscas \n\nconsole.log(ticket);\n\n// --- Extrae atributos (ajusta si tu estructura es distinta) ---\nconst attr = ticket || ticket;\nconst tecnico = attr.assigned_user.full_name || \"No asignado\";\nconst estado = attr.state || \"Desconocido\";\nconst categoria = attr.categoria || \"Sin categoría\";\nconst descripcion = attr.descripcion || \"-\";\nconst fecha = attr.updatedAt || attr.fecha_actualizacion || \"-\"; // Ajusta campo de fecha\nconst fechaStr = new Date(fecha).toLocaleString()\n\n// --- Arma el mensaje de estado ---\nconst texto = \n  `Categoría: *${categoria}*\\n` +\n  `Descripción: *${descripcion}*\\n` +\n  `Estado: *${estado}*\\n` +\n  `Técnico asignado: *${tecnico}*\\n` +\n  `Última actualización: *${fechaStr}*\\n\\n`\n\n// --- Menú formato META API ---\nconst menu = {\n  type: \"interactive\",\n  interactive: {\n    type: \"button\",\n    header: {\n      type: \"text\",\n      text: `Estado de tu ticket #${ticket.id}`\n    },\n    body: {\n      text: texto\n    },\n    footer: {\n      text: \"CND Soporte\"\n    },\n    action: {\n      buttons: [\n        {\n          type: \"reply\",\n          reply: {\n            id: `ticket_action_comment_${ticket.id}`,\n            title: \"Agregar comentario\"\n          }\n        },\n        {\n          type: \"reply\",\n          reply: {\n            id: \"main_menu\",\n            title: \"Menú principal\"\n          }\n        }\n      ]\n    }\n  }\n};\n\nreturn [{ json: menu }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        832
+      ],
+      "id": "9b8bb3cc-cfb8-4549-99a5-1c2b9fac1773",
+      "name": "Construir menú dinámico de tickets1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({\"messaging_product\": \"whatsapp\", \"to\": $('Webhook').item.json.body.entry[0].changes[0].value.contacts[0].wa_id}, $json) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        1232
+      ],
+      "id": "d989e603-00b8-43a8-b151-c1e5f7c09d14",
+      "name": "Ver estado del Ticket"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Webhook').item.json.body.entry[0].changes[0].value.contacts[0].wa_id }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"Por favor, describe brevemente el problema o envía una foto/video que muestre la avería.\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        2288
+      ],
+      "id": "efb0f3ce-2879-4e87-aef2-507160693319",
+      "name": "Agregar comentario"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Función: Parsear datos').item.json.from }}\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"button\",\n    \"header\": {\n      \"type\": \"text\",\n      \"text\": \"Gestión del Ticket #{{ $('Función: Parsear datos').item.json.postbackText.match(/(?<=_).*/) }}\"\n    },\n    \"body\": {\n      \"text\": \"¿Qué deseas hacer con este ticket?\"\n    },\n    \"footer\": {\n      \"text\": \"CND Soporte\"\n    },\n    \"action\": {\n      \"buttons\": [\n        {\n          \"type\": \"reply\",\n          \"reply\": {\n            \"id\": \"ticket_action_status_{{ $('Función: Parsear datos').item.json.postbackText.match(/(?<=_).*/) }}\",\n            \"title\": \"Consultar estado\"\n          }\n        },\n        {\n          \"type\": \"reply\",\n          \"reply\": {\n            \"id\": \"ticket_action_comment_{{ $('Función: Parsear datos').item.json.postbackText.match(/(?<=_).*/) }}\",\n            \"title\": \"Agregar comentario\"\n          }\n        },\n        {\n          \"type\": \"reply\",\n          \"reply\": {\n            \"id\": \"main_menu\",\n            \"title\": \"Menú principal\"\n          }\n        }\n      ]\n    }\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        1424
+      ],
+      "id": "bacea8dc-629a-4713-958a-14ad07121b7c",
+      "name": "Vista Ticket"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Supón que items[0].json.data es el array de tickets de Strapi\nlet tickets = $('Buscar Tickets del Hotel').first().json.data.tickets.filter((t) => t.state !== \"cerrado\"); // Ajusta según tu respuesta real\n\n// Construimos dinámicamente las opciones - FORMATO META API\nconst rows = tickets.map(ticket => ({\n    id: `ticket_${ticket.id}`,\n    title: `Ticket #${ticket.id}`,\n    description: `${ticket.categoria || 'Sin categoría'} – ${ticket.state || 'Estado desconocido'}`\n}));\n\n// Construimos el menú - FORMATO META API\nconst menu = {\n    type: \"interactive\",\n    interactive: {\n        type: \"list\",\n        header: {\n            type: \"text\",\n            text: \"Tus tickets activos\"\n        },\n        body: {\n            text: \"Selecciona el ticket que deseas gestionar:\"\n        },\n        footer: {\n            text: \"CND Soporte\"\n        },\n        action: {\n            button: \"Seleccionar ticket\",\n            sections: [\n                {\n                    title: \"Tickets activos\",\n                    rows: rows\n                }\n            ]\n        }\n    }\n};\n\nreturn menu;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        112,
+        320
+      ],
+      "id": "f191051b-8438-4b47-a5c2-698d082f117b",
+      "name": "Construir menú dinámico de tickets"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({\"messaging_product\": \"whatsapp\", \"to\": $('Función: Parsear datos').item.json.from}, $json) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        320
+      ],
+      "id": "7cf6318d-97ac-4876-a8af-5dc1b106d69d",
+      "name": "Vista Multiple Tickets"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "73c605d5-9961-4dfa-8f77-f9f872c8194d",
+              "leftValue": "={{ $json.data.ticket_temporal }}",
+              "rightValue": "",
+              "operator": {
+                "type": "object",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        112,
+        2752
+      ],
+      "id": "fe337625-b609-41e5-825c-4a212edb4db9",
+      "name": "Existe Ticket Temporal?"
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=http://localhost:1337/api/ticket-temporals/{{ $('Añadir descripcion al Ticket temporal').first().json.data.documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1456,
+        4240
+      ],
+      "id": "90c91660-e894-42a4-8bd9-a085d5c9cc0e",
+      "name": "Cerrar Ticket Temporal",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=http://localhost:1337/api/ticket-temporals/{{ $('Extraer codigo del hotel').item.json.hotelMember.ticket_temporal.documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"prioridad\": \"{{ $('Función: Parsear datos').item.json.postbackText.slice(16) }}\",\n    \"step\": \"descripcion\",\n    \"timestamp\": \"{{ $now }}\"\n  }\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        592
+      ],
+      "id": "b5c4525d-93fb-4499-be52-1fa2e03618f6",
+      "name": "Añadir Prioridad al Ticket temporal",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=http://localhost:1337/api/ticket-temporals/{{ $json.data.ticket_temporal.documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        2672
+      ],
+      "id": "594095fc-f234-4df4-9e06-e34507309c35",
+      "name": "Eliminar Ticket Temporal",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Webhook').item.json.body.entry[0].changes[0].value.contacts[0].wa_id }}\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"list\",\n    \"header\": {\n      \"type\": \"text\",\n      \"text\": \"Reportar Avería\"\n    },\n    \"body\": {\n      \"text\": \"¿Qué tipo de problema tienes?\"\n    },\n    \"footer\": {\n      \"text\": \"CND Soporte\"\n    },\n    \"action\": {\n      \"button\": \"Elegir opción\",\n      \"sections\": [\n        {\n          \"title\": \"Categorías de soporte\",\n          \"rows\": [\n            {\n              \"id\": \"ticket_category_refrigeracion\",\n              \"title\": \"Equipos refrigeración\",\n              \"description\": \"Problemas con equipos de frío y refrigeración.\"\n            },\n            {\n              \"id\": \"ticket_category_calidad\",\n              \"title\": \"Calidad\",\n              \"description\": \"Reportes relacionados con la calidad del producto.\"\n            },\n            {\n              \"id\": \"ticket_category_facturacion\",\n              \"title\": \"Facturación\",\n              \"description\": \"Consultas o problemas con facturas.\"\n            },\n            {\n              \"id\": \"ticket_category_co2\",\n              \"title\": \"CO₂\",\n              \"description\": \"Problemas con sistemas de CO₂ o gas.\"\n            },\n            {\n              \"id\": \"ticket_category_entregas\",\n              \"title\": \"Entregas\",\n              \"description\": \"Inconvenientes con pedidos o entregas.\"\n            }\n          ]\n        }\n      ]\n    }\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        592
+      ],
+      "id": "95c79e07-4bb1-4034-90f6-bda5b9f9380f",
+      "name": "Menu Categoria"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "49a6a3f2-cb61-42c5-af95-7000c86861f9",
+              "leftValue": "={{ $('Extraer codigo del hotel').item.json.hotelMember.ticket_temporal }}",
+              "rightValue": "",
+              "operator": {
+                "type": "object",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        112,
+        80
+      ],
+      "id": "5282b980-dfbc-4d67-94ce-0720bcec65e4",
+      "name": "Existe Ticket temporal?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://localhost:1337/api/ticket-temporals?populate=*",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"step\": \"categoria\",                \n    \"categoria\": null,                  \n    \"prioridad\": null,\n    \"descripcion\": null,\n    \"hotel_member\": \"{{ $('Extraer codigo del hotel').item.json.hotelMember.documentId }}\",\n    \"adjuntos\": [],\n    \"timestamp\": \"{{ $now }}\"           \n  }\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        16
+      ],
+      "id": "a8c4c217-88ca-4f69-909c-3fc18d3fd053",
+      "name": "Crear Ticket temporal",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Webhook').item.json.body.entry[0].changes[0].value.contacts[0].wa_id }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"Por favor, describe brevemente el problema o envía una foto/video que muestre la avería.\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        992
+      ],
+      "id": "496259a4-f38a-4713-9192-ebc829e99038",
+      "name": "Mensaje Detalles del Ticket"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Webhook').item.json.body.entry[0].changes[0].value.contacts[0].wa_id }}\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"list\",\n    \"header\": {\n      \"type\": \"text\",\n      \"text\": \"Prioridad de la avería\"\n    },\n    \"body\": {\n      \"text\": \"¿Qué tan urgente es el problema?\"\n    },\n    \"footer\": {\n      \"text\": \"CND Soporte\"\n    },\n    \"action\": {\n      \"button\": \"Elegir prioridad\",\n      \"sections\": [\n        {\n          \"title\": \"Nivel de urgencia\",\n          \"rows\": [\n            {\n              \"id\": \"ticket_priority_critico\",\n              \"title\": \"Crítico\",\n              \"description\": \"No se puede operar sin resolver.\"\n            },\n            {\n              \"id\": \"ticket_priority_alta\",\n              \"title\": \"Alta\",\n              \"description\": \"Afecta parcialmente la operación.\"\n            },\n            {\n              \"id\": \"ticket_priority_media\",\n              \"title\": \"Media\",\n              \"description\": \"Puede esperar unas horas.\"\n            },\n            {\n              \"id\": \"ticket_priority_baja\",\n              \"title\": \"Baja\",\n              \"description\": \"No afecta la operación.\"\n            }\n          ]\n        }\n      ]\n    }\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        2528
+      ],
+      "id": "39ebe225-4540-49c2-aeed-a16b3edaaa0d",
+      "name": "Menu Prioridad del Ticket"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=http://localhost:1337/api/ticket-temporals/{{ $('Extraer codigo del hotel').item.json.hotelMember.ticket_temporal.documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"categoria\": \"{{ $('Función: Parsear datos').item.json.postbackText.slice(16) }}\",\n    \"step\": \"prioridad\",\n    \"timestamp\": \"{{ $now }}\"           \n  }\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        112,
+        512
+      ],
+      "id": "6cc2370b-c528-42d2-a128-415a8055827c",
+      "name": "Añadir Categoria al Ticket temporal",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=http://localhost:1337/api/ticket-temporals/{{ $('Extraer codigo del hotel').item.json.hotelMember.ticket_temporal.documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"descripcion\": \"{{ $('Función: Parsear datos').item.json.texto }}\",\n    \"timestamp\": \"{{ $now }}\"           \n  }\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        3952
+      ],
+      "id": "39e2e7cf-151c-46e5-bc4b-e2b13a638e1e",
+      "name": "Añadir descripcion al Ticket temporal",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "36dd6f6e-cb7d-4ad3-b9b0-57b860c3f5c2",
+                    "leftValue": "={{ $('Extraer codigo del hotel').item.json.hotelMember.ticket_temporal.step }}",
+                    "rightValue": "descripcion",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "2031e5ee-3906-485c-9299-2e32f4ad3640",
+                    "leftValue": "={{ $('Extraer codigo del hotel').item.json.hotelMember.ticket_temporal.descripcion }}",
+                    "rightValue": "descripcion",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEquals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        112,
+        4112
+      ],
+      "id": "c22d7089-8327-4f58-a3a4-28cd4a5e825c",
+      "name": "Tipo de texto"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.data.ticket_temporal.categoria }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "empty",
+                      "singleValue": true
+                    },
+                    "id": "1b9b22ae-9b2a-4af4-a28f-9f3cb4ef3727"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fb077069-b62a-4313-b0e9-83a41b758125",
+                    "leftValue": "={{ $json.data.ticket_temporal.prioridad }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "empty",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "fa3fb817-5177-41da-84e0-82d80e807099",
+                    "leftValue": "={{ $json.data.ticket_temporal.descripcion }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "empty",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        336,
+        2400
+      ],
+      "id": "851c724b-6a0f-4f4e-b25c-6c01cacf9b6a",
+      "name": "Reanudar Ticket temporal"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Webhook').item.json.body.entry[0].changes[0].value.contacts[0].wa_id }}\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"list\",\n    \"header\": {\n      \"type\": \"text\",\n      \"text\": \"Ticket pendiente detectado\"\n    },\n    \"body\": {\n      \"text\": \"Tienes un reporte de avería en progreso. ¿Deseas continuar editándolo o descartarlo para empezar uno nuevo?\"\n    },\n    \"footer\": {\n      \"text\": \"CND Soporte\"\n    },\n    \"action\": {\n      \"button\": \"Seleccionar opción\",\n      \"sections\": [\n        {\n          \"title\": \"Opciones\",\n          \"rows\": [\n            {\n              \"id\": \"ticket_temporal_continuar\",\n              \"title\": \"Sí, continuar ticket\",\n              \"description\": \"Seguiré donde lo dejé\"\n            },\n            {\n              \"id\": \"main_menu\",\n              \"title\": \"No, cerrar borrador\",\n              \"description\": \"Descartar y comenzar nuevo ticket\"\n            }\n          ]\n        }\n      ]\n    }\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        4208
+      ],
+      "id": "595a40d8-c253-4392-bc9b-54ff64d5de05",
+      "name": "Continuar creación del Ticket?"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "main_reportar",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "99ee61d5-8b97-4f34-8899-ce7f03d7b22e"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "e1f41715-74ec-41c6-997b-41ad6ddec4a2",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "main_ver",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "5caeedc5-8d32-461d-b424-e581835ffdee",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_category_refrigeracion",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "9c40e104-b005-4854-bd67-006e41920456",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_category_calidad",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "e3cc21b2-4612-43b7-8bcf-c955f32cf422",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_category_facturacion",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "00e5e89b-64e0-4918-881a-2a86678b143e",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_category_co2",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "8320559d-2da2-4437-95c8-1e968da818ab",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_category_entregas",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "31e34124-8c5a-4094-a70e-a2379b4e8ad6",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_category_otro",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "05c93be4-70b1-4163-9f9c-6af9f9c86de5",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_priority_critico",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "7ae4a2bf-3154-48de-a86b-c30dd2e0a55a",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_priority_alta",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "277e30a1-142c-476b-bfc5-0c24b7cdfa0f",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_priority_media",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "3ba8370d-4e6f-42c6-b132-00d5ce478f9f",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_priority_baja",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "3baa339d-3abd-4388-b261-eeb85b16b641",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_temporal_continuar",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "e8449f38-a464-4795-a831-6cd24af1760b",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_temporal_cerrar",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "a583f9b1-46ba-4ffb-a0ba-31cfe21ce2ba",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_action_status_",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "496bcba3-e64f-4d83-8db7-0a89b8a3752b",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_action_comment_",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "a8e85bbe-e337-4301-bae0-7ed5191dbb6a",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "ticket_",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "a9ff52a6-8170-42f1-9bdd-0da7c5fcbd16",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "Evaluar atención",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "csat-pending-open-case",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "csat_pending_open",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "main-menu-case",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "main_menu",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "024c858c-26e2-4418-b12b-6c58f3a14350",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "csat_ticket_",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "4426f774-f597-4801-bdbe-35e2973398a9",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "csat_1",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "c358019e-c729-4765-93d9-5dc95d068db8",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "csat_2",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "d06ac2d6-493b-4202-a786-d6974105fefc",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "csat_3",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "4d891839-d279-40ac-b034-9c86ef76c9e5",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "csat_4",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "1a8934b1-432e-4692-be45-29ae5a97c7ea",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "csat_5",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "46ef4eb7-95e4-4894-b70b-4a7eda58bfed",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "csat_comment_yes_",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "9d95af0d-011c-4647-a12e-7a5a00a82bf8",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "csat_comment_no_",
+                    "operator": {
+                      "type": "string",
+                      "operation": "startsWith"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "csat-comment-text-flow",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.tipo }}",
+                    "rightValue": "text",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "5edd5510-6f5d-439f-b124-efdbdbf15fe5",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "main_menu",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -112,
+        752
+      ],
+      "id": "7f813efc-ce74-4dc7-88c3-ec266dbab20c",
+      "name": "Flujo creacion de Ticket"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEmpty",
+                      "singleValue": true
+                    },
+                    "id": "f2368b48-b367-40ba-8534-6d767e9236d6"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "61a23fc2-990e-4643-b141-5665ce78068c",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.texto }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEmpty",
+                      "singleValue": true
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "8db2ed6f-e8d8-4c02-992a-dd221ef59c44",
+                    "leftValue": "={{ $('Función: Parsear datos').item.json.image_url }}",
+                    "rightValue": "",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notEquals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -1008,
+        3648
+      ],
+      "id": "e387c16b-831d-4028-becc-7d455f0a7de3",
+      "name": "Clasificar mensajes"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Recibe el objeto completo como 'items[0].body' en n8n\nconst body = $(\"Webhook\").first().json.body;\nconst value = body.entry[0].changes[0].value;\nconst msg = value.messages ? value.messages[0] : {};\nconst contact = value.contacts ? value.contacts[0] : {};\n\nlet output = {\n  from: msg.from || contact.wa_id || \"\",\n  nombre: contact.profile ? contact.profile.name : \"\",\n  tipo: msg.type || \"\",\n  texto: \"\",\n  postbackText: \"\",\n  image_url: \"\",\n  image_caption: \"\",\n  payload_original: msg,\n  is_token_acceso: false\n};\n\n// Manejo para list_reply (menú tipo lista)\nif (msg.type === \"interactive\" && msg.interactive && msg.interactive.list_reply) {\n  output.texto = msg.interactive.list_reply.title || \"\";\n  output.postbackText = \"\";\n  try {\n    const idObj = JSON.parse(msg.interactive.list_reply.id);\n    output.postbackText = idObj.postbackText || \"\";\n  } catch (e) {\n    output.postbackText = msg.interactive.list_reply.id || \"\";\n  }\n}\n\n// Manejo para button_reply y quick_reply (menú de botones o quick reply)\nelse if (msg.type === \"interactive\" && msg.interactive && msg.interactive.button_reply) {\n  output.texto = msg.interactive.button_reply.title || \"\";\n  output.postbackText = \"\";\n  try {\n    const idObj = JSON.parse(msg.interactive.button_reply.id);\n    output.postbackText = idObj.postbackText || \"\";\n  } catch (e) {\n    output.postbackText = msg.interactive.button_reply.id || \"\";\n  }\n}\n\n// Manejo para quick_reply (algunos bots lo mandan fuera de interactive)\nelse if (msg.type === \"quick_reply\" && msg.quick_reply) {\n  output.texto = msg.quick_reply.title || \"\";\n  output.postbackText = msg.quick_reply.postbackText || \"\";\n}\n\n// Mensaje de texto simple\nelse if (msg.type === \"text\" && msg.text) {\n  output.texto = msg.text.body;\n  const token_acceso = /^#[0-9]{8}$/.test(msg.text.body);\n  if (token_acceso){\n    output.texto = msg.text.body.slice(1);\n  }\n  output.is_token_acceso = token_acceso;\n}\n\n// Imagen\nelse if (msg.type === \"image\" && msg.image) {\n  output.image_url = msg.image.url;\n  output.image_caption = msg.image.caption || \"\";\n  output.texto = msg.image.caption || \"\";\n}\n\nelse if (msg.type === \"button\" && msg.button){\n  output.postbackText = msg.button.text;\n}\n\n// (Opcional) Puedes agregar aquí audio, video, documentos, etc.\n\nreturn [output];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4144,
+        4048
+      ],
+      "id": "2f9b750f-5750-42ab-8f9a-4eeabb45b747",
+      "name": "Función: Parsear datos"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/tickets/{{ $('Extraer codigo del hotel').item.json.hotelMember.actual_ticket.documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        112,
+        2176
+      ],
+      "id": "342266be-5541-4c09-beeb-cd94ee0ed12e",
+      "name": "Buscar el ticket",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/hotel-members?populate=actual_ticket&filters[documentId]={{ $('Extraer codigo del hotel').first().json.hotelMember.documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        112,
+        3616
+      ],
+      "id": "b9b990b1-f182-444b-b33d-f25b5e5873e7",
+      "name": "Buscar Ticket actual",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "1e21eee5-07b7-4b15-9ae8-1f93aaf52120",
+              "leftValue": "={{ $json.data[0].actual_ticket }}",
+              "rightValue": "",
+              "operator": {
+                "type": "object",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        336,
+        3616
+      ],
+      "id": "9871f8fb-8033-45f7-8ee5-fb192e092369",
+      "name": "Existe Ticket actual?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Función: Parsear datos').item.json.from }}\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"button\",\n    \"header\": {\n      \"type\": \"text\",\n      \"text\": \"¡Comentario recibido!\"\n    },\n    \"body\": {\n      \"text\": \"Tu mensaje ha sido agregado al ticket correctamente. ¿Qué deseas hacer ahora?\"\n    },\n    \"footer\": {\n      \"text\": \"CND Soporte\"\n    },\n    \"action\": {\n      \"buttons\": [\n        {\n          \"type\": \"reply\",\n          \"reply\": {\n            \"id\": \"ticket_action_comment_{{ $('Existe Ticket actual?').item.json.data.active_ticket.id }}\",\n            \"title\": \"Agregar comentario\"\n          }\n        },\n        {\n          \"type\": \"reply\",\n          \"reply\": {\n            \"id\": \"ticket_action_status_{{ $('Existe Ticket actual?').item.json.data.active_ticket.id }}\",\n            \"title\": \"Consultar estado\"\n          }\n        },\n        {\n          \"type\": \"reply\",\n          \"reply\": {\n            \"id\": \"main_menu\",\n            \"title\": \"Menú principal\"\n          }\n        }\n      ]\n    }\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1456,
+        3856
+      ],
+      "id": "0bbf8489-a53d-46ce-8e14-96d7735eac83",
+      "name": "Comentario agregado"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=http://localhost:1337/api/hotel-members/{{ $('Extraer codigo del hotel').first().json.documentId }}?populate=*",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"data\": {\n    \"actual_ticket\": null\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1456,
+        3248
+      ],
+      "id": "2959a8b0-62c3-406a-a780-917a6103c297",
+      "name": "Limpiar Ticket Actual",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "495c3da2-d958-4efa-b281-82df535f8e18",
+              "leftValue": "={{ $('Función: Parsear datos').item.json.tipo }}",
+              "rightValue": "text",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        560,
+        3664
+      ],
+      "id": "d8371c9d-9621-41b1-b5ce-b15447145a16",
+      "name": "Texto o Imagen?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://localhost:1337/api/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"content\": \"{{ $('Función: Parsear datos').item.json.texto }}\",\n    \"ticket\": \"{{ $('Texto o Imagen?').item.json.data[0].actual_ticket.documentId }}\",\n    \"author\": \"{{ $('Texto o Imagen?').item.json.data[0].documentId }}\",\n    \"message_type\": \"{{ $('Función: Parsear datos').item.json.tipo }}\",\n    \"media_url\": \"{{ $json.url }}\",\n    \"internal\": false,\n    \"requires_operator\": true,\n    \"sent_at\": \"{{ $now }}\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1232,
+        4048
+      ],
+      "id": "7286a7ce-6f9f-40f4-b111-125f3a040241",
+      "name": "Crear comentario Imagen",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://localhost:1337/api/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"ticket\": \"{{ $json.data[0].actual_ticket.documentId }}\",\n    \"author\": \"{{ $json.data[0].documentId }}\",\n    \"message_type\": \"{{ $('Función: Parsear datos').item.json.tipo }}\",\n    \"content\": \"{{ $('Función: Parsear datos').item.json.texto }}\",\n    \"internal\": false,\n    \"requires_operator\": true,\n    \"sent_at\": \"{{ $now }}\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1232,
+        3856
+      ],
+      "id": "bd39e42c-69a0-47c7-947a-5b515c987609",
+      "name": "Crear comentario Texto",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "content": "## Recibir mensaje y buscar el Cliente \nRecibimos el mensaje de whatsapp e identificamos si el usuario existe o no, luego revisamos si este tiene tickets.",
+        "height": 1040,
+        "width": 3304
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -4736,
+        3360
+      ],
+      "typeVersion": 1,
+      "id": "c4731260-fa68-4fb0-83b5-1ef9f88f8466",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## Menu segun cantidad de Tickets",
+        "height": 600,
+        "width": 460,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        272,
+        2240
+      ],
+      "typeVersion": 1,
+      "id": "c15d6b5c-3770-485d-84b5-a9a110f502d7",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "efae7c10-a3af-4a29-a133-2acdb8ac1afa",
+              "leftValue": "={{ $('Extraer codigo del hotel').item.json.hotelMember.ticket_temporal }}",
+              "rightValue": "",
+              "operator": {
+                "type": "object",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "33b9dcb3-b1b4-4e3f-8526-20ee7dac074e",
+              "leftValue": "={{ $('Extraer codigo del hotel').item.json.hotelMember.ticket_temporal.step }}",
+              "rightValue": "completo",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -112,
+        3808
+      ],
+      "id": "982abae6-9f87-48de-9a74-f3130766c8ce",
+      "name": "Ticket temporal incompleto"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7d03480d-5f1d-4d89-92b1-e0f5fd5d448c",
+              "leftValue": "={{ $json.sesion_activa }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2352,
+        4048
+      ],
+      "id": "4126b86e-397e-47e7-a8c8-a331406d49fd",
+      "name": "¿La sesion esta activa?",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "d8bc1900-6b23-4609-8bea-534402731cae",
+              "leftValue": "={{ $('Función: Parsear datos').item.json.is_token_acceso }}",
+              "rightValue": "pin",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -3472,
+        3952
+      ],
+      "id": "0a5922bc-a774-48ec-9d4d-289665341a59",
+      "name": "Intento de login?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7d03480d-5f1d-4d89-92b1-e0f5fd5d448c",
+              "leftValue": "={{ $json.data }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "array",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2800,
+        3760
+      ],
+      "id": "7cd92b86-b56b-427d-85e1-5648059ab399",
+      "name": "¿Clave asociada a Hotel?",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=http://localhost:1337/api/hotel-members/{{ $json.hotelMember }}\n",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"last_session\": \"{{ $now }}\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1904,
+        3568
+      ],
+      "id": "3c8230f7-7511-4254-8760-db9eb4cb64cb",
+      "name": "Actualizar ultima sesion",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Función: Parsear datos').item.json.from }}\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"button\",\n    \"header\": {\n      \"type\": \"text\",\n      \"text\": \"Código no válido\"\n    },\n    \"body\": {\n      \"text\": \"El código ingresado no es válido. Recuerda que debe comenzar con # y tener 8 números.\\nEjemplo: #12345678\\nPor favor, intenta de nuevo.\"\n    },\n    \"footer\": {\n      \"text\": \"Si tienes dudas, presiona Ayuda.\"\n    },\n    \"action\": {\n      \"buttons\": [\n        {\n          \"type\": \"reply\",\n          \"reply\": {\n            \"id\": \"ayuda_codigo\",\n            \"title\": \"Ayuda\"\n          }\n        }\n      ]\n    }\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2576,
+        3856
+      ],
+      "id": "d8a6f2b9-30ec-4be4-b5fc-007acb8beb2e",
+      "name": "Mensaje de PIN incorrecto"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "53c1b908-a1f5-4264-a7b6-cfe444b66e61",
+              "leftValue": "={{ $json.postbackText }}",
+              "rightValue": "ayuda_codigo",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -3248,
+        4048
+      ],
+      "id": "cbe5180c-9074-473f-b398-9543d8943f19",
+      "name": "Necesita ayuda?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Función: Parsear datos').item.json.from }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"Ayuda texto\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3024,
+        3952
+      ],
+      "id": "a4939b6a-c377-4fc9-9710-65e4bf8aa69d",
+      "name": "Mensaje ayuda"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/hotel-members?&populate[0]=hotel&populate[1]=ticket_temporal&populate[2]=actual_ticket&populate[3]=messages&populate[4]=csats&populate[5]=csat_temporal.ticket",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3024,
+        4144
+      ],
+      "id": "1e8df1a8-5e9d-4eee-bde1-599a69ac0590",
+      "name": "Buscar Miembro del hotel",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7d03480d-5f1d-4d89-92b1-e0f5fd5d448c",
+              "leftValue": "={{ $json.data[0].hotel }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "object",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2800,
+        4144
+      ],
+      "id": "5682d1ba-2bf7-47cd-96ec-8a17ecd24b6f",
+      "name": "¿Miembro de hotel?",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/hotel-members?populate=*&filters[hotel][documentId]={{ $json.data[0].documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2576,
+        3664
+      ],
+      "id": "9a9979ae-8c63-4419-b36b-32dc7a71b453",
+      "name": "Buscar Miembro del hotel1",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/customers?filters[token_acceso][$eq]={{ $('Función: Parsear datos').item.json.texto }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3024,
+        3760
+      ],
+      "id": "13864fa0-b5be-4c50-aad8-e944ca1831bf",
+      "name": "Buscar Hotel por token_acceso",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://localhost:1337/api/hotel-members",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"phone\": \"{{ $('Función: Parsear datos').item.json.from }}\",\n    \"nombre\": \"{{ $('Función: Parsear datos').item.json.nombre }}\",\n    \"member_status\": \"activo\",\n    \"hotel\": \"{{ $('Buscar Hotel por token_acceso').item.json.data[0].documentId }}\",\n    \"last_session\": \"{{ $now }}\"\n  }\n} ",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1904,
+        3808
+      ],
+      "id": "f11822ec-afa3-46e1-a9e0-78a21d494328",
+      "name": "Registrar numero",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "7d03480d-5f1d-4d89-92b1-e0f5fd5d448c",
+              "leftValue": "={{ $json.data[0].hotel }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "object",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -2352,
+        3664
+      ],
+      "id": "5f6560b8-787d-4646-94e5-986782c5c536",
+      "name": "¿Existe el Miembro?",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Función: Parsear datos').item.json.from }}\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"button\",\n    \"header\": {\n      \"type\": \"text\",\n      \"text\": \"¡Hola de nuevo!\"\n    },\n    \"body\": {\n      \"text\": \"¡Hola {{ $('Buscar Miembro del hotel').item.json.data[0].nombre }} de {{ $('Buscar Miembro del hotel').item.json.data[0].hotel.full_name }}! Por favor, ingresa el código de acceso de tu hotel para continuar.\\nRecuerda, debe comenzar con # seguido de 8 números.\\nEjemplo: #12345678\"\n    },\n    \"footer\": {\n      \"text\": \"¿Tienes dudas? Presiona Ayuda.\"\n    },\n    \"action\": {\n      \"buttons\": [\n        {\n          \"type\": \"reply\",\n          \"reply\": {\n            \"id\": \"ayuda_codigo\",\n            \"title\": \"Ayuda\"\n          }\n        }\n      ]\n    }\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2128,
+        4096
+      ],
+      "id": "cd3c9c10-4ac3-41c1-94bf-254bf88f5599",
+      "name": "Pedir PIN a Miembro de Hotel"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Función: Parsear datos').item.json.from }}\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"button\",\n    \"header\": {\n      \"type\": \"text\",\n      \"text\": \"Acceso requerido\"\n    },\n    \"body\": {\n      \"text\": \"Para acceder a los servicios de CND, por favor ingresa el código de acceso de tu hotel. Debe comenzar con # seguido de 8 números.\\nEjemplo: #12345678\"\n    },\n    \"footer\": {\n      \"text\": \"Si tienes dudas, presiona Ayuda.\"\n    },\n    \"action\": {\n      \"buttons\": [\n        {\n          \"type\": \"reply\",\n          \"reply\": {\n            \"id\": \"ayuda_codigo\",\n            \"title\": \"Ayuda\"\n          }\n        }\n      ]\n    }\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2576,
+        4240
+      ],
+      "id": "faa62d0a-d1a3-42fa-b5e3-153373dd1768",
+      "name": "Solicitar PIN formalmente"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/customers/{{ $json.documentId }}?populate[0]=tickets&populate[1]=zone&populate[2]=tickets.assigned_user&populate[3]=tickets.feedback_score&populate[4]=tickets.author",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1456,
+        3664
+      ],
+      "id": "68370bc6-2471-4d05-99df-b31b92e72dee",
+      "name": "Buscar Tickets del Hotel"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ========================================\n// Compute: CSAT State\n// ========================================\n// Calcula tickets pendientes de evaluación CSAT\n\nconst helpers = $('Lib: helpers').first().json;\n\n// Obtener tickets desde la fuente actual\nconst tickets = $input.first().json.data.tickets || [];\n\n// Obtener authorId desde \"Buscar Miembro del hotel1\" o \"Buscar Miembro del hotel\"\nlet authorId = null;\ntry {\n  const hotelMember1 = $('Buscar Miembro del hotel1').first().json.data;\n  if (hotelMember1 && hotelMember1.length > 0) {\n    authorId = hotelMember1[0].documentId;\n  }\n} catch (e) {}\n\nif (!authorId) {\n  try {\n    const hotelMember = $('Buscar Miembro del hotel').first().json.data;\n    if (hotelMember && hotelMember.length > 0) {\n      authorId = hotelMember[0].documentId;\n    }\n  } catch (e) {}\n}\n\n// Definir estados finales (ajusta según tu backend)\nconst CLOSED_STATES = [\"cerrado\", \"closed\", \"resuelto\", \"completado\"];\n\n// Calcular tickets pendientes de evaluación CSAT\nconst pending = tickets.filter(t => {\n  // Debe estar cerrado\n  if (!CLOSED_STATES.includes(t.state)) return false;\n  \n  // Debe ser del mismo autor\n  if (t.author?.documentId !== authorId) return false;\n  \n  // Debe estar pendiente de evaluación CSAT\n  return (t.csat_pending === true) || \n         (!t.csat_score && !t.feedback_score);\n}).sort((a, b) => {\n  // Ordenar por closedAt descendente (si existe)\n  if (a.closedAt && b.closedAt) {\n    return new Date(b.closedAt) - new Date(a.closedAt);\n  }\n  return 0;\n});\n\nreturn [{ json: { pending, authorId } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1232,
+        3664
+      ],
+      "id": "92454b13-a7d7-41b6-9ccd-7332e673ee55",
+      "name": "Compute: CSAT state"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Supón que tienes en $json.session_start (string tipo ISO, ej: \"2025-07-23T20:15:00Z\")\nconst sessionStart = new Date($input.first().json.data[0].last_session); // Fecha/hora de inicio de sesión\nconst now = new Date();\n\nconst diffMs = now - sessionStart; // Diferencia en milisegundos\nconst diffMin = diffMs / 1000 / 60; // Diferencia en minutos\n\nif (diffMin > 20) {\n  // Más de 15 minutos\n  return [{ json: { sesion_activa: false, minutos_transcurridos: diffMin } }];\n} else {\n  // Sesión sigue activa\n  return [{ json: { sesion_activa: true, minutos_transcurridos: diffMin } }];\n}\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2576,
+        4048
+      ],
+      "id": "48d4ff3c-cb41-486b-810e-8d44486c84e9",
+      "name": "Calcular el tiempo de la sesion"
+    },
+    {
+      "parameters": {
+        "jsCode": "let hotelMember = null;\n\ntry {\n  const extData = $('Buscar Miembro del hotel').first().json.data || [];\n  if (extData.length > 0) {\n    hotelMember = extData[0];\n  }\n} catch (e) {}\n\nif (!hotelMember) {\n  try {\n    const extData = $('Buscar Miembro del hotel1').first().json.data || [];\n    if (extData.length > 0) {\n      hotelMember = extData[0];\n    }\n  } catch (e) {}\n}\n\nreturn [{ json: { hotelMember: hotelMember.documentId } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2128,
+        3568
+      ],
+      "id": "4caa0b7c-6fb8-48d3-8171-5196a42f3814",
+      "name": "Extraer codigo de miembro"
+    },
+    {
+      "parameters": {
+        "jsCode": "let docId = null;\nlet hotelMember;\n\ntry {\n  const tokenData = $('Buscar Hotel por token_acceso').first().json.data || [];\n  if (tokenData.length > 0) {\n    docId = tokenData[0].documentId;\n  }\n} catch (e) {}\n\nif (!docId) {\n  try {\n    const extData = $('Buscar Miembro del hotel').first().json.data || [];\n    if (extData.length > 0) {\n      docId = extData[0].hotel.documentId;\n    }\n  } catch (e) {}\n}\n\n\ntry {\n  const extData = $('Buscar Miembro del hotel').first().json.data || [];\n  if (extData.length > 0) {\n    hotelMember = extData[0];\n  }\n} catch (e) {}\n\nif (!hotelMember) {\n  try {\n    const extData = $('Buscar Miembro del hotel1').first().json.data || [];\n    if (extData.length > 0) {\n      hotelMember = extData[0];\n    }\n  } catch (e) {}\n}\n\nreturn [{ json: { documentId: docId, hotelMember: hotelMember } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1680,
+        3664
+      ],
+      "id": "5aeea856-687d-4acc-81db-d86c6d851d70",
+      "name": "Extraer codigo del hotel"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://localhost:1337/api/tickets?populate=*",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"categoria\": \"{{ $('Añadir descripcion al Ticket temporal').first().json.data.categoria.toLowerCase() }}\",\n    \"descripcion\": \"{{ $('Añadir descripcion al Ticket temporal').first().json.data.descripcion }}\",\n    \"state\": \"asignado\",\n    \"source\": \"whatsapp\",\n    \"customer_tickets\": \"{{ $('Extraer codigo del hotel').first().json.documentId }}\",\n    \"author\": \"{{ $('Extraer codigo del hotel').first().json.hotelMember.documentId }}\",\n    \"service_zone\": null,\n    \"assigned_user\": \"{{ $json.operador_id }}\",\n    \"creation_time\": \"{{$now}}\"\n  }\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1232,
+        4240
+      ],
+      "id": "908f0b72-693a-46a0-b907-936b7c044d61",
+      "name": "Crear Ticket Completo"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/tickets?filters[service_zone][documentId][$eq]={{ $('Buscar Tickets del Hotel').item.json.data.zone.documentId }}&filters[state][$ne]=closed&populate=assigned_user",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        784,
+        3952
+      ],
+      "id": "68518c3b-996b-4279-9cde-03958c3649bb",
+      "name": "Buscar Tickets de esta Zona",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const operadoresResponse = $('Buscar tecnicos disponible').all();\nconst tickets = $input.first().json.data;\n\nconst operadores = operadoresResponse.map(op => op.json); // nombre del nodo anterior\n\nconsole.log(\"operadores\", operadores);\nconsole.log(\"tickets\", tickets);\n\n// Inicializa el contador\nconst operadorCount = {};\noperadores.forEach(op => {\n  operadorCount[op.id] = 0;\n});\n\n// Cuenta los tickets asignados a cada operador\ntickets.forEach(ticket => {\n  const asignado = ticket.assigned_user && ticket.assigned_user.id;\n  console.log(asignado);\n  if (asignado && operadorCount.hasOwnProperty(asignado)) {\n    operadorCount[asignado] += 1;\n    console.log(asignado);\n  }\n});\n\n\n\n// Selecciona el operador con menos tickets\nlet minTickets = Infinity;\nlet operadorSeleccionado = null;\nfor (const id in operadorCount) {\n  console.log(operadorCount);\n  if (operadorCount[id] < minTickets) {\n    minTickets = operadorCount[id];\n    operadorSeleccionado = id;\n  }\n}\n\nreturn [{ json: { operador_id: operadorSeleccionado } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        3952
+      ],
+      "id": "fb264b2e-e1e3-4dd4-9e0d-5043484fd142",
+      "name": "Code"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Hora actual en zona horaria de RD (UTC-4)\nconst now = new Date();\nconst options = { timeZone: \"America/Santo_Domingo\", hour12: false };\nconst hour = parseInt(now.toLocaleTimeString(\"en-US\", { ...options, hour: \"2-digit\" }));\n\n// Horario laboral: 8:00 a 17:00\nconst dentroHorario = hour >= 8 && hour < 17;\n\n// Guardamos flag en el flujo\nreturn [\n  {\n    json: {\n      dentroHorario\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3920,
+        4048
+      ],
+      "id": "5cda4ed5-c9ee-4b5c-b5aa-da39f9d20a16",
+      "name": "Verificar horario"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "4203ea3b-5e9c-48d7-b579-9acd4dcf4c2a",
+              "leftValue": "={{ $json.dentroHorario }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -3696,
+        4048
+      ],
+      "id": "1fdc15b3-79e6-419e-8833-3cca8143155d",
+      "name": "Esta en horario?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Función: Parsear datos').item.json.from }}\",\n  \"type\": \"text\",\n  \"context\": {\n    \"message_id\": \"{{ $('Función: Parsear datos').item.json.payload_original.id }}\"\n  },\n  \"text\": {\n    \"body\": \"Saludos, actualmente nuestro equipo de soporte técnico no se encuentra disponible. Nuestro horario de servicio es de lunes a domingo de 8:00 a.m. a 5:00 p.m.\\n\\nSu requerimiento será atendido en las próximas 24 horas.\"\n  }\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3472,
+        4144
+      ],
+      "id": "8b5d5c2c-d2bc-420a-bdea-5cfda9d48ede",
+      "name": "Mensaje fuera de horario"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "b8e4c105-0f01-4b8c-9dd8-d0d4ea28163d",
+              "leftValue": "={{ $('Función: Parsear datos').item.json.is_token_acceso }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -784,
+        3472
+      ],
+      "id": "5edfe692-0dc0-4f13-9c65-f9c233018b2b",
+      "name": "Es codigo de Validacion?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({\"messaging_product\": \"whatsapp\", \"to\": $('Función: Parsear datos').item.json.from}, $json) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        1216
+      ],
+      "id": "72cdef36-2fe1-4128-9076-cbbe494efc48",
+      "name": "Evaluar tickets"
+    },
+    {
+      "parameters": {
+        "jsCode": "// postbackText esperado: \"csat_ticket_149\"\nconst postback = $('Función: Parsear datos').first().json.postbackText;\nconst ticketId = postback.replace(\"csat_ticket_\", \"\");\n\n// FORMATO META API\nconst menu = {\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"list\",\n    \"header\": {\n      \"type\": \"text\",\n      \"text\": `Califica Ticket #${ticketId}`\n    },\n    \"body\": {\n      \"text\": \"¿Cómo calificarías la atención recibida?\"\n    },\n    \"footer\": {\n      \"text\": \"1 = Muy mala · 5 = Excelente\"\n    },\n    \"action\": {\n      \"button\": \"Calificar\",\n      \"sections\": [\n        {\n          \"title\": \"Opciones\",\n          \"rows\": [\n            { \"id\": `csat_1_${ticketId}`, \"title\": \"⭐ 1\", \"description\": \"Muy mala\" },\n            { \"id\": `csat_2_${ticketId}`, \"title\": \"⭐ 2\", \"description\": \"Mala\" },\n            { \"id\": `csat_3_${ticketId}`, \"title\": \"⭐ 3\", \"description\": \"Aceptable\" },\n            { \"id\": `csat_4_${ticketId}`, \"title\": \"⭐ 4\", \"description\": \"Buena\" },\n            { \"id\": `csat_5_${ticketId}`, \"title\": \"⭐ 5\", \"description\": \"Excelente\" }\n          ]\n        }\n      ]\n    }\n  }\n};\n\nreturn [{ json: menu }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        112,
+        1408
+      ],
+      "id": "6da7d8a5-199a-45ab-84cc-d148b4f45c01",
+      "name": "Code3"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({\"messaging_product\": \"whatsapp\", \"to\": $('Webhook').item.json.body.entry[0].changes[0].value.contacts[0].wa_id}, $json) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        1408
+      ],
+      "id": "319de999-feba-4401-9fa2-77e9a7f848fb",
+      "name": "Calificacion de Ticket"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Webhook').item.json.body.entry[0].changes[0].value.contacts[0].wa_id }}\",\n  \"type\": \"interactive\",\n  \"interactive\": {\n    \"type\": \"button\",\n    \"header\": {\n      \"type\": \"text\",\n      \"text\": \"¿Agregar comentario?\"\n    },\n    \"body\": {\n      \"text\": \"¿Quieres escribir un comentario adicional sobre el servicio?\"\n    },\n    \"footer\": {\n      \"text\": \"Opcional\"\n    },\n    \"action\": {\n      \"buttons\": [\n        {\n          \"type\": \"reply\",\n          \"reply\": {\n            \"id\": \"csat_comment_yes_149_4\",\n            \"title\": \"Sí\"\n          }\n        },\n        {\n          \"type\": \"reply\",\n          \"reply\": {\n            \"id\": \"csat_comment_no_149_4\",\n            \"title\": \"No\"\n          }\n        }\n      ]\n    }\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1232,
+        1808
+      ],
+      "id": "68cb73e9-fd5c-4f48-b406-744039e0fdca",
+      "name": "Feedback?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Webhook').item.json.body.entry[0].changes[0].value.contacts[0].wa_id }}\",\n  \"type\": \"text\",\n  \"text\": {\n    \"body\": \"*Agregar comentario*\\n\\nPor favor escribe tu comentario ahora. Puedes contarnos tu experiencia con el servicio.\\n\\n_Cuando lo envíes, quedará registrado junto a tu calificación._\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        1792
+      ],
+      "id": "53427fa7-2d07-44ef-9639-656a8e533eaa",
+      "name": "Feedback?2"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://localhost:1337/api/csat-temporals",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"ticket\": \"{{ $('Buscar Ticket para CSAT').item.json.data.documentId }}\",\n    \"hotel_member\": \"{{ $('Extraer codigo del hotel').item.json.hotelMember.documentId }}\",\n    \"score\": {{ $('Extraer score CSAT').item.json.score }},\n    \"feedback\": null\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1008,
+        1808
+      ],
+      "id": "212eca77-af45-47d4-a3f4-07191d92918f",
+      "name": "Registrar CSAT Score"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/tickets/{{ $('Extraer ticket ID CSAT').item.json.ticketId }}?populate=*",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        1808
+      ],
+      "id": "4e7c845d-8e54-4cc7-a94b-e8b539cdc2f3",
+      "name": "Buscar Ticket para CSAT"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extraer el score del postbackText (ej: csat_3_149 -> score = 3)\nconst postback = $('Función: Parsear datos').first().json.postbackText;\nconst scoreMatch = postback.match(/csat_(\\d+)_/);\nconst score = scoreMatch ? parseInt(scoreMatch[1]) : 1;\n\nreturn [{ json: { score } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        1808
+      ],
+      "id": "861fd72a-59c4-4d8b-b4df-6cdd443da345",
+      "name": "Extraer score CSAT"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extraer el ticket ID del postbackText (ej: csat_3_149 -> ticketId = 149)\nconst postback = $('Función: Parsear datos').first().json.postbackText;\nconst ticketMatch = postback.match(/csat_\\d+_(\\d+)/);\nconst ticketId = ticketMatch ? ticketMatch[1] : null;\n\nreturn [{ json: { ticketId } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        1600
+      ],
+      "id": "008a3638-d6c5-4c81-86e2-0d75604ca63e",
+      "name": "Extraer ticket ID CSAT"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "csat-comment-yes",
+              "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+              "rightValue": "csat_comment_yes_",
+              "operator": {
+                "type": "string",
+                "operation": "startsWith"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        112,
+        1792
+      ],
+      "id": "9fb4a3e6-198d-45ce-a2d7-24fd0f11e525",
+      "name": "CSAT: ¿Quiere comentario?"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "csat-comment-no",
+              "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText }}",
+              "rightValue": "csat_comment_no_",
+              "operator": {
+                "type": "string",
+                "operation": "startsWith"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        112,
+        1984
+      ],
+      "id": "2e6aaf54-c949-44d0-8c8f-b060dec846d2",
+      "name": "CSAT: No quiere comentario"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "csat-score-1",
+              "leftValue": "={{ $('Función: Parsear datos').item.json.postbackText.includes(\"csat_1\") || $('Función: Parsear datos').item.json.postbackText.includes(\"csat_2\") || $('Función: Parsear datos').item.json.postbackText.includes(\"csat_3\") || $('Función: Parsear datos').item.json.postbackText.includes(\"csat_4\") || $('Función: Parsear datos').item.json.postbackText.includes(\"csat_5\") }}",
+              "rightValue": "csat_1_",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        112,
+        1600
+      ],
+      "id": "8e061f78-f167-4e6a-8054-361e8a0fbfbe",
+      "name": "CSAT: Score recibido"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "csat-comment-text",
+              "leftValue": "={{ $json.data[0] }}",
+              "rightValue": "text",
+              "operator": {
+                "type": "object",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -336,
+        3616
+      ],
+      "id": "d0b8f41e-107c-44fa-88e8-ab0cf234e351",
+      "name": "CSAT: Comentario de texto"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://localhost:1337/api/csats",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"ticket\": \"{{ $('Extraer codigo del hotel').item.json.hotelMember.csat_temporal.ticket.documentId }}\",\n    \"hotel_member\": \"{{ $('Extraer codigo del hotel').item.json.hotelMember.documentId }}\",\n    \"score\": {{ $('Extraer codigo del hotel').item.json.hotelMember.csat_temporal.score }},\n    \"feedback\": null,\n    \"submitted_at\": \"{{ $now }}\",\n    \"csat_response\": \"{{ $('Extraer codigo del hotel').item.json.hotelMember.hotel.documentId }}\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        1984
+      ],
+      "id": "dbf55929-18ff-4993-a06d-8ad9b04b5f93",
+      "name": "Registrar CSAT Score1"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/csat-temporals?populate=*&filters[hotel_member][documentId]={{ $('Extraer codigo del hotel').item.json.hotelMember.documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -560,
+        3616
+      ],
+      "id": "b6a191be-6b70-4b7e-af60-b0365fb2c59c",
+      "name": "Buscar CSAT temporal"
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=http://localhost:1337/api/csat-temporals/{{ $json.data[0].documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        784,
+        2448
+      ],
+      "id": "9fecafc5-e270-4bbb-9226-792868b58779",
+      "name": "Borrar CSAT temporal"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://localhost:1337/api/csats",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"ticket\": \"{{ $json.data[0].ticket.documentId }}\",\n    \"hotel_member\": \"{{ $json.data[0].hotel_member.documentId }}\",\n    \"csat_response\": \"{{ $('Extraer codigo del hotel').item.json.hotelMember.hotel.documentId }}\",\n    \"score\": {{ $json.data[0].score }},\n    \"feedback\": \"{{ $('Función: Parsear datos').item.json.texto }}\",\n    \"submitted_at\": \"{{ $now }}\"\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        3392
+      ],
+      "id": "1858809b-3c63-4fe2-9636-842f788dc406",
+      "name": "Crear CSAT con Comentario"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ========================================\n// Gracias CSAT Dinámico\n// ========================================\n// Construye menú de gracias dinámico según tickets pendientes\n\nconst pending = $('Compute: CSAT state').first().json.pending || [];\nconst destination = $('Webhook').first().json.body.entry[0].changes[0].value.contacts[0].wa_id;\n\nlet options = [];\nlet header, text;\n\nif (pending.length > 0) {\n  // Aún quedan tickets por calificar\n  header = \"✅ ¡Gracias por tu respuesta!\";\n  text = \"Tu opinión nos ayuda a mejorar nuestro servicio.\";\n\n  options = [\n    {\n      type: \"text\",\n      title: \"Calificar más\",\n      postbackText: \"csat_pending_open\"\n    },\n    {\n      type: \"text\",\n      title: \"Menú principal\",\n      postbackText: \"main_menu\"\n    }\n  ];\n} else {\n  // No hay más tickets por calificar\n  header = \"🎉 ¡Listo!\";\n  text = \"No tienes más tickets por calificar. ¡Gracias por ayudarnos a mejorar!\";\n\n  options = [\n    {\n      type: \"text\",\n      title: \"Menú principal\",\n      postbackText: \"main_menu\"\n    }\n  ];\n}\n\n// Construcción directa del quick_reply\nconst menu = {\n  type: \"quick_reply\",\n  msgid: \"csat-thanks-dynamic\",\n  content: {\n    type: \"text\",\n    header,\n    text,\n    caption: \"CND Soporte\"\n  },\n  options,\n  to: destination\n};\n\nreturn [{ json: menu }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        2720
+      ],
+      "id": "37cafd3d-88d7-4c35-a3f9-6c8d249feb6a",
+      "name": "Gracias CSAT Dinámico"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ========================================\n// CSAT Pending Open\n// ========================================\n// Maneja \"Calificar más\" abriendo lista de pendientes\n\nconst helpers = $('Lib: helpers').first().json;\nconst pending = $('Compute: CSAT state').first().json.pending || [];\nconst destination = $('Webhook').first().json.body.entry[0].changes[0].value.contacts[0].wa_id;\n\nif (pending.length === 0) {\n  // No hay tickets pendientes\n  const menu = helpers.buildQuickReply(\n    \"csat-no-pending\",\n    \"✅ ¡Gracias!\",\n    \"No tienes tickets pendientes por evaluar.\",\n    \"CND Soporte\",\n    [\n      {\n        type: \"text\",\n        title: \"Menú principal\",\n        postbackText: \"main_menu\"\n      }\n    ]\n  );\n  menu.to = destination;\n  return [{ json: menu }];\n}\n\n// Construir lista de tickets pendientes\nconst options = pending.map(t => ({\n  type: \"text\",\n  title: `Ticket #${t.id}`,\n  description: `${t.categoria || 'Sin categoría'} – ${helpers.trunc(t.descripcion, 50) || 'Sin descripción'}`,\n  postbackText: `csat_ticket_${t.id}`\n}));\n\nconst menu = helpers.buildList(\n  \"csat-pending-list\",\n  \"Encuestas pendientes\",\n  \"Selecciona un ticket para evaluar:\",\n  \"CND Soporte\",\n  [{ type: \"text\", title: \"Seleccionar ticket\" }],\n  [\n    {\n      title: \"Tickets cerrados\",\n      subtitle: \"Elige uno para evaluar\",\n      options\n    }\n  ]\n);\n\nmenu.to = destination;\nreturn [{ json: menu }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1008,
+        4144
+      ],
+      "id": "8e77cf17-5599-4bdd-bc3c-4b10cb7364d7",
+      "name": "CSAT Pending Open"
+    },
+    {
+      "parameters": {
+        "method": "DELETE",
+        "url": "=http://localhost:1337/api/csat-temporals/{{ $('Extraer codigo del hotel').item.json.hotelMember.csat_temporal.documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        784,
+        4144
+      ],
+      "id": "6e361e81-9ae7-4f8c-9022-b628d73787e0",
+      "name": "Borrar CSAT temporal1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP6eLoZBHvvsLcTVZC9FwJkp3X7xkob2z1tsowbKOjVJafRp1ZCy5eKCY1VgZCz5nE0uNaksplEKcQgsZBLBf0mSZCPBZAiZBs3ccyOZBOMegAnqrYZBOylQ5Qh9CbtGwsIiJXSVCRxXoJtM7c2MqisXBbZAVi3MI20cOKUaflZAk7eQZAvGtu5ky8ZBc3soFQMJtTSXVbN5oFmd6Sw1VZCsNmQ1Hv2y3KDKc4HhFRJYN9QZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({\"messaging_product\": \"whatsapp\", \"to\": $('Webhook').item.json.body.entry[0].changes[0].value.contacts[0].wa_id}, $json) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1232,
+        2816
+      ],
+      "id": "f3551a07-07f8-4b14-80ef-a1c8f51414f2",
+      "name": "Enviar WhatsApp CSAT"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Helper seguro para obtener data de un nodo\nfunction safeGet(nodeName) {\n  try {\n    const node = $(nodeName);\n    if (node && node.all().length > 0) {\n      return node.first().json.data || [];\n    }\n  } catch (e) {\n    return []; // si el nodo no existe o no corrió, devolvemos []\n  }\n  return [];\n}\n\n// Obtener tickets de forma segura\nconst tickets = $('Buscar Tickets del Hotel').first()?.json?.data?.tickets || [];\n\n// Buscar author en los dos posibles nodos\nconst data1 = safeGet('Buscar Miembro del hotel1');\nconst data2 = safeGet('Buscar Miembro del hotel');\n\nlet author = data1[0]?.documentId || data2[0]?.documentId || \"\";\n\n// Filtrar tickets cerrados sin feedback del mismo hotel_member\nconst ticketsFeedback = tickets.filter(\n  (t) => !t.feedback_score && t.state === \"cerrado\" && t.author?.documentId === author\n);\n\n// Construir opciones del menú\nconst options = ticketsFeedback.map((t) => ({\n  type: \"text\",\n  title: `Ticket #${t.id}`,\n  description: `${t.categoria || 'Sin categoría'} – ${t.descripcion?.slice(0, 30) || 'Sin descripción'}`,\n  postbackText: `csat_ticket_${t.id}`\n}));\n\n// Construir mensaje tipo list\nconst menu = {\n  type: \"list\",\n  msgid: \"csat-pending-list\",\n  title: \"Encuestas pendientes\",\n  body: \"Antes de continuar, evalúa tus tickets cerrados:\",\n  footer: \"CND Soporte\",\n  globalButtons: [\n    { type: \"text\", title: \"Seleccionar ticket\" }\n  ],\n  items: [\n    {\n      title: \"Tickets cerrados\",\n      subtitle: \"Selecciona uno para evaluar\",\n      options\n    }\n  ]\n};\n\nreturn [{ json: menu }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        2960
+      ],
+      "id": "80183c8e-e69b-42b6-9ea9-e8980b9a78e1",
+      "name": "Buscar ticket para evaluar1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v22.0/848478885021265/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer EAALfFZAYSb7sBP4iWopkDfxZB7z9T4JhbYZBqVTGiJkfthApuHWAZAoAoy75QEg816ZCZBZAOiCPjzJcaaVbhZBG4LNe0giSKRsZCHarDg7topCOpuhRjUQRkbbhjLNFLMNtFsr8RgRP75sQGSfEzWydKq9NxZC9JH4w3bRFKRrLt6j1AsiSTYJCyfp15ILlM6Y9m8dQZDZD"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({\"messaging_product\": \"whatsapp\", \"to\": $('Función: Parsear datos').item.json.from}, $('Crear menu').first().json) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        3248
+      ],
+      "id": "2d57ed58-5cc9-48ee-8ea9-82c538a29aa6",
+      "name": "Menu"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Helper seguro para obtener data de un nodo\nfunction safeGet(nodeName) {\n  try {\n    const node = $(nodeName);\n    if (node && node.all().length > 0) {\n      return node.first().json.data || [];\n    }\n  } catch (e) {\n    return [];\n  }\n  return [];\n}\n\n// Obtener tickets de forma segura\nconst tickets = $('Buscar Tickets del Hotel').first().json.data.tickets || [];\n\n// Buscar author en los dos posibles nodos\nconst data1 = safeGet('Buscar Miembro del hotel1');\nconst data2 = safeGet('Buscar Miembro del hotel');\nlet author = data1[0]?.documentId || data2[0]?.documentId || \"\";\n\n// Filtrar tickets cerrados sin feedback del mismo hotel_member\nconst ticketsFeedback = tickets.filter(\n  (t) => !t.feedback_score && t.state === \"cerrado\" && t.author?.documentId === author\n);\n\nconsole.log(ticketsFeedback);\n\n// -------------------\n// Construir menú dinámico post-CSAT - FORMATO META API\n// -------------------\nlet buttons = [];\n\n// Si aún quedan tickets pendientes → mostrar \"Calificar más\"\nif (ticketsFeedback.length > 0) {\n  buttons.push({\n    type: \"reply\",\n    reply: {\n      id: \"Evaluar atención\",\n      title: \"Calificar más\"\n    }\n  });\n}\n\n// Siempre mostrar \"Menú principal\"\nbuttons.push({\n  type: \"reply\",\n  reply: {\n    id: \"main_menu\",\n    title: \"Menú principal\"\n  }\n});\n\nconst menuThanks = {\n  type: \"interactive\",\n  interactive: {\n    type: \"button\",\n    header: {\n      type: \"text\",\n      text: \"✅ ¡Gracias por tu respuesta!\"\n    },\n    body: {\n      text: \"Tu opinión nos ayuda a mejorar nuestro servicio.\"\n    },\n    footer: {\n      text: \"CND Soporte\"\n    },\n    action: {\n      buttons\n    }\n  }\n};\n\nreturn [{ json: menuThanks }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        4336
+      ],
+      "id": "7116a48f-4ff5-4452-bec3-7c8e1ab76d8c",
+      "name": "Buscar ticket para evaluar2"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/hotel-members?populate=actual_ticket&filters[documentId]={{ $('Extraer codigo del hotel').first().json.documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1008,
+        3152
+      ],
+      "id": "b23483d6-5217-4fb1-b8af-5b52074e4574",
+      "name": "Buscar Ticket actual1",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "jsCode": "const tickets = $('Buscar Tickets del Hotel').first().json.data.tickets || [];\nconst abiertos = tickets.filter((t) => t.state !== \"cerrado\");\nconst nombre = $('Función: Parsear datos').first().json.nombre;\nconst showFeedback = $input.first().json.items[0].options.length < 1; // cámbialo según corresponda\n\n// Base del menú - FORMATO META API\nlet menu = {\n  type: \"interactive\",\n  interactive: {\n    type: \"button\",\n    header: {\n      type: \"text\",\n      text: \"Centro de Atención\"\n    },\n    body: {\n      text: `¡Hola ${nombre}! ¿En qué podemos ayudarte hoy? Selecciona una opción:`\n    },\n    footer: {\n      text: \"Cervecería Nacional Dominicana\"\n    },\n    action: {\n      buttons: []\n    }\n  }\n};\n\n// Lógica dinámica según cantidad de tickets\nif (abiertos.length === 0) {\n  menu.interactive.action.buttons.push({\n    type: \"reply\",\n    reply: {\n      id: \"main_reportar\",\n      title: \"Reportar avería\"\n    }\n  });\n} else if (abiertos.length === 1) {\n  menu.interactive.action.buttons.push(\n    {\n      type: \"reply\",\n      reply: {\n        id: `ticket_${abiertos[0].id}`,\n        title: \"Ver ticket actual\"\n      }\n    },\n    {\n      type: \"reply\",\n      reply: {\n        id: \"main_reportar\",\n        title: \"Reportar avería\"\n      }\n    }\n  );\n} else {\n  menu.interactive.action.buttons.push(\n    {\n      type: \"reply\",\n      reply: {\n        id: \"main_ver\",\n        title: `Ver mis tickets (${abiertos.length})`\n      }\n    },\n    {\n      type: \"reply\",\n      reply: {\n        id: \"main_reportar\",\n        title: \"Reportar avería\"\n      }\n    }\n  );\n}\n\n// Agregar Evaluar atención si showFeedback = true\nif (!showFeedback) {\n  menu.interactive.action.buttons.push({\n    type: \"reply\",\n    reply: {\n      id: \"Evaluar atención\",\n      title: \"Evaluar atención\"\n    }\n  });\n}\n\nreturn menu;\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        3152
+      ],
+      "id": "7e2111a5-aa3b-4172-8950-b95243d18b72",
+      "name": "Crear menu"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/tickets/{{ $('Extraer codigo del hotel').item.json.hotelMember.actual_ticket.documentId }}?populate=*",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        112,
+        832
+      ],
+      "id": "62a309d1-b8b6-4be2-b602-e5d5f1ad5d37",
+      "name": "Buscar Ticket actual2"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=http://localhost:1337/api/hotel-members/{{ $('Extraer codigo de miembro').item.json.hotelMember }}?populate=*",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"actual_ticket\": \"{{ $json.data[0].documentId }}\"\n  }\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        1024
+      ],
+      "id": "f603139e-04ee-4dac-93f6-f5970349a27a",
+      "name": "Asignar ticket actual",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "jsCode": "// Helper seguro para obtener data de un nodo\nfunction safeGet(nodeName) {\n  try {\n    const node = $(nodeName);\n    if (node && node.all().length > 0) {\n      return node.first().json.data || [];\n    }\n  } catch (e) {\n    return []; // si el nodo no existe o no corrió, devolvemos []\n  }\n  return [];\n}\n\n// Obtener tickets de forma segura\nconst tickets = $('Buscar Tickets del Hotel').first()?.json?.data?.tickets || [];\n\n// Buscar author en los dos posibles nodos\nconst data1 = safeGet('Buscar Miembro del hotel1');\nconst data2 = safeGet('Buscar Miembro del hotel');\n\nlet author = data1[0]?.documentId || data2[0]?.documentId || \"\";\n\n// Filtrar tickets cerrados sin feedback del mismo hotel_member\nconst ticketsFeedback = tickets.filter(\n  (t) => !t.feedback_score && t.state === \"cerrado\" && t.author?.documentId === author\n);\n\n// Construir opciones del menú\nconst options = ticketsFeedback.map((t) => ({\n  type: \"text\",\n  title: `Ticket #${t.id}`,\n  description: `${t.categoria || 'Sin categoría'} – ${t.descripcion?.slice(0, 30) || 'Sin descripción'}`,\n  postbackText: `csat_ticket_${t.id}`\n}));\n\n// Construir mensaje tipo list\nconst menu = {\n  type: \"list\",\n  msgid: \"csat-pending-list\",\n  title: \"Encuestas pendientes\",\n  body: \"Antes de continuar, evalúa tus tickets cerrados:\",\n  footer: \"CND Soporte\",\n  globalButtons: [\n    { type: \"text\", title: \"Seleccionar ticket\" }\n  ],\n  items: [\n    {\n      title: \"Tickets cerrados\",\n      subtitle: \"Selecciona uno para evaluar\",\n      options\n    }\n  ]\n};\n\nreturn [{ json: menu }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        112,
+        1216
+      ],
+      "id": "8f7a977f-05cc-4ad8-aacb-de197294d680",
+      "name": "Buscar ticket para evaluar"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/tickets?filters[id][$eq]={{ $('Función: Parsear datos').item.json.postbackText.slice(7) }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        112,
+        1024
+      ],
+      "id": "b82cef7c-9f01-4a2e-8670-6cf64f008004",
+      "name": "Buscar Ticket para asignar"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "3ad6b852-e90c-4775-afd0-b41f8d7bd285",
+              "leftValue": "={{ $json.meta.pagination.total }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1232,
+        3248
+      ],
+      "id": "d96014f7-7624-4ee5-9a94-7bcdd0fae8db",
+      "name": "Tiene ticket actual?"
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/users?filters[custom_role]=technician&filters[zone][name][$eq]={{ $('Buscar Tickets del Hotel').first().json.data.zone.name }}&populate=zone",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        3952
+      ],
+      "id": "a74d1aa2-5a2c-4393-91c0-78a438e8b067",
+      "name": "Buscar tecnicos disponible",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=http://localhost:1337/api/hotel-members/{{ $('Extraer codigo de miembro').item.json.hotelMember }}?populate=*",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"data\": {\n    \"actual_ticket\": \"{{ $json.data.documentId }}\"\n  }\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        336,
+        2176
+      ],
+      "id": "3de9e525-acf8-4ccd-a847-63164c3d15ad",
+      "name": "Asignar ticket actual1",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Función: Parsear datos').item.json.image_url }}",
+        "options": {
+          "redirect": {
+            "redirect": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        784,
+        3760
+      ],
+      "id": "59c8ae36-348e-4cb4-af31-0f9ed157c681",
+      "name": "Crear comentario Imagen1",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:1337/api/upload",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "files",
+              "inputDataFieldName": "data"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "redirect": {}
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1008,
+        3760
+      ],
+      "id": "310869d6-b523-44ac-985f-5160061eafcd",
+      "name": "Crear comentario Imagen2",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "url": "=http://localhost:1337/api/csat-temporals?populate=*&filters[hotel_member][documentId]={{ $('Extraer codigo del hotel').item.json.hotelMember.documentId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer 7853e2cdbbee30cf852855174eb9e7714cee7af46db90dcfc5cac9e4ae3b815f73f3fa93809a511329bcb2e61b36f3cb595f4d960f34ba9c707a3cabee8fb5cf171d4d90ca2b789db261bfac703e5d6001fba1cfc23c3e80bf26d550a5385de9564513cee4e6f4c38582ab6968aa3e1a46135e3476f514f6aa63b89b4c7fdb11"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        560,
+        2096
+      ],
+      "id": "cb510a5b-9211-4e91-9ef6-d6a18aade8c3",
+      "name": "Buscar CSAT temporal1"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -4576,
+        4048
+      ],
+      "id": "74174e35-c493-4971-81ec-94884de65539",
+      "name": "Webhook",
+      "webhookId": "b87f9f59-6741-4f80-ab3a-7ec48b5b2e87"
+    },
+    {
+      "parameters": {
+        "updates": [
+          "messages"
+        ],
+        "options": {}
+      },
+      "type": "n8n-nodes-base.whatsAppTrigger",
+      "typeVersion": 1,
+      "position": [
+        -3648,
+        5456
+      ],
+      "id": "47fe3f83-0fca-4fb0-af7c-57f103515f26",
+      "name": "WhatsApp Trigger",
+      "webhookId": "ef9488d4-e220-4cd9-ac5c-778734faa887",
+      "credentials": {
+        "whatsAppTriggerApi": {
+          "id": "Mg2DfKPARul5xRVK",
+          "name": "WhatsApp OAuth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "60313c69-cf13-4675-9298-af470091bb27",
+              "name": "",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -3440,
+        5456
+      ],
+      "id": "09dcca80-e620-45f4-b658-857213a43a70",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  {\n    json: {\n      challenge: $json[\"query\"][\"hub.challenge\"]\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3456,
+        5600
+      ],
+      "id": "14a04413-36d8-45db-a75b-1dc4ad892a20",
+      "name": "Code1"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.challenge }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [
+        -3248,
+        5600
+      ],
+      "id": "e0f203ea-1895-4fe5-893b-d03a30deb1e2",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "path": "whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -3664,
+        5600
+      ],
+      "id": "f66374ab-2f24-45dc-ab1a-8d1554c74167",
+      "name": "Verificar Webhook",
+      "webhookId": "b87f9f59-6741-4f80-ab3a-7ec48b5b2e87"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Construir menú dinámico de tickets1": {
+      "main": [
+        [
+          {
+            "node": "Ver estado del Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Construir menú dinámico de tickets": {
+      "main": [
+        [
+          {
+            "node": "Vista Multiple Tickets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Existe Ticket Temporal?": {
+      "main": [
+        [
+          {
+            "node": "Eliminar Ticket Temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar ticket para evaluar1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Existe Ticket temporal?": {
+      "main": [
+        [
+          {
+            "node": "Menu Categoria",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Crear Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear Ticket temporal": {
+      "main": [
+        [
+          {
+            "node": "Menu Categoria",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Añadir Prioridad al Ticket temporal": {
+      "main": [
+        [
+          {
+            "node": "Mensaje Detalles del Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Añadir Categoria al Ticket temporal": {
+      "main": [
+        [
+          {
+            "node": "Añadir Prioridad al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Añadir descripcion al Ticket temporal": {
+      "main": [
+        [
+          {
+            "node": "Buscar tecnicos disponible",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tipo de texto": {
+      "main": [
+        [
+          {
+            "node": "Añadir descripcion al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Continuar creación del Ticket?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reanudar Ticket temporal": {
+      "main": [
+        [
+          {
+            "node": "Menu Categoria",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Menu Prioridad del Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mensaje Detalles del Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flujo creacion de Ticket": {
+      "main": [
+        [
+          {
+            "node": "Existe Ticket temporal?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Construir menú dinámico de tickets",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Añadir Categoria al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Añadir Categoria al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Añadir Categoria al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Añadir Categoria al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Añadir Categoria al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Añadir Categoria al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Añadir Prioridad al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Añadir Prioridad al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Añadir Prioridad al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Añadir Prioridad al Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reanudar Ticket temporal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Existe Ticket Temporal?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar Ticket actual2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar el ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar Ticket para asignar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar ticket para evaluar",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar ticket para evaluar1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CSAT: Score recibido",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CSAT: Score recibido",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CSAT: Score recibido",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CSAT: Score recibido",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CSAT: Score recibido",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CSAT: ¿Quiere comentario?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CSAT: No quiere comentario",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [],
+        [
+          {
+            "node": "CSAT: Score recibido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Eliminar Ticket Temporal": {
+      "main": [
+        [
+          {
+            "node": "Buscar ticket para evaluar1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Clasificar mensajes": {
+      "main": [
+        [
+          {
+            "node": "Flujo creacion de Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Es codigo de Validacion?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ticket temporal incompleto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Función: Parsear datos": {
+      "main": [
+        [
+          {
+            "node": "Verificar horario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar el ticket": {
+      "main": [
+        [
+          {
+            "node": "Asignar ticket actual1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Ticket actual": {
+      "main": [
+        [
+          {
+            "node": "Existe Ticket actual?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Existe Ticket actual?": {
+      "main": [
+        [
+          {
+            "node": "Texto o Imagen?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar ticket para evaluar1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Limpiar Ticket Actual": {
+      "main": [
+        [
+          {
+            "node": "Menu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Texto o Imagen?": {
+      "main": [
+        [
+          {
+            "node": "Crear comentario Texto",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Crear comentario Imagen1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear comentario Imagen": {
+      "main": [
+        [
+          {
+            "node": "Comentario agregado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear comentario Texto": {
+      "main": [
+        [
+          {
+            "node": "Comentario agregado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ticket temporal incompleto": {
+      "main": [
+        [
+          {
+            "node": "Tipo de texto",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar Ticket actual",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿La sesion esta activa?": {
+      "main": [
+        [
+          {
+            "node": "Extraer codigo de miembro",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pedir PIN a Miembro de Hotel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intento de login?": {
+      "main": [
+        [
+          {
+            "node": "Buscar Hotel por token_acceso",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Necesita ayuda?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Clave asociada a Hotel?": {
+      "main": [
+        [
+          {
+            "node": "Buscar Miembro del hotel1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mensaje de PIN incorrecto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Actualizar ultima sesion": {
+      "main": [
+        [
+          {
+            "node": "Extraer codigo del hotel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Necesita ayuda?": {
+      "main": [
+        [
+          {
+            "node": "Mensaje ayuda",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar Miembro del hotel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Miembro del hotel": {
+      "main": [
+        [
+          {
+            "node": "¿Miembro de hotel?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Miembro de hotel?": {
+      "main": [
+        [
+          {
+            "node": "Calcular el tiempo de la sesion",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Solicitar PIN formalmente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Miembro del hotel1": {
+      "main": [
+        [
+          {
+            "node": "¿Existe el Miembro?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Hotel por token_acceso": {
+      "main": [
+        [
+          {
+            "node": "¿Clave asociada a Hotel?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar numero": {
+      "main": [
+        [
+          {
+            "node": "Extraer codigo del hotel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Existe el Miembro?": {
+      "main": [
+        [
+          {
+            "node": "Extraer codigo de miembro",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Registrar numero",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Tickets del Hotel": {
+      "main": [
+        [
+          {
+            "node": "Compute: CSAT state",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calcular el tiempo de la sesion": {
+      "main": [
+        [
+          {
+            "node": "¿La sesion esta activa?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer codigo de miembro": {
+      "main": [
+        [
+          {
+            "node": "Actualizar ultima sesion",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer codigo del hotel": {
+      "main": [
+        [
+          {
+            "node": "Buscar Tickets del Hotel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear Ticket Completo": {
+      "main": [
+        [
+          {
+            "node": "Cerrar Ticket Temporal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Tickets de esta Zona": {
+      "main": [
+        [
+          {
+            "node": "Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code": {
+      "main": [
+        [
+          {
+            "node": "Crear Ticket Completo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificar horario": {
+      "main": [
+        [
+          {
+            "node": "Esta en horario?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Esta en horario?": {
+      "main": [
+        [
+          {
+            "node": "Intento de login?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mensaje fuera de horario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Es codigo de Validacion?": {
+      "main": [
+        [
+          {
+            "node": "Buscar ticket para evaluar1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Buscar CSAT temporal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code3": {
+      "main": [
+        [
+          {
+            "node": "Calificacion de Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CSAT: Score recibido": {
+      "main": [
+        [
+          {
+            "node": "Extraer ticket ID CSAT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer ticket ID CSAT": {
+      "main": [
+        [
+          {
+            "node": "Buscar Ticket para CSAT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Ticket para CSAT": {
+      "main": [
+        [
+          {
+            "node": "Extraer score CSAT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer score CSAT": {
+      "main": [
+        [
+          {
+            "node": "Registrar CSAT Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar CSAT Score": {
+      "main": [
+        [
+          {
+            "node": "Feedback?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CSAT: ¿Quiere comentario?": {
+      "main": [
+        [
+          {
+            "node": "Feedback?2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CSAT: No quiere comentario": {
+      "main": [
+        [
+          {
+            "node": "Registrar CSAT Score1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CSAT: Comentario de texto": {
+      "main": [
+        [
+          {
+            "node": "Crear CSAT con Comentario",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ticket temporal incompleto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Registrar CSAT Score1": {
+      "main": [
+        [
+          {
+            "node": "Buscar CSAT temporal1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar CSAT temporal": {
+      "main": [
+        [
+          {
+            "node": "CSAT: Comentario de texto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Borrar CSAT temporal": {
+      "main": [
+        [
+          {
+            "node": "Gracias CSAT Dinámico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear CSAT con Comentario": {
+      "main": [
+        [
+          {
+            "node": "Borrar CSAT temporal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Borrar CSAT temporal1": {
+      "main": [
+        [
+          {
+            "node": "Gracias CSAT Dinámico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar ticket para evaluar1": {
+      "main": [
+        [
+          {
+            "node": "Crear menu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar ticket para evaluar2": {
+      "main": [
+        [
+          {
+            "node": "Gracias CSAT Dinámico",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Ticket actual1": {
+      "main": [
+        [
+          {
+            "node": "Tiene ticket actual?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear menu": {
+      "main": [
+        [
+          {
+            "node": "Buscar Ticket actual1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Ticket actual2": {
+      "main": [
+        [
+          {
+            "node": "Construir menú dinámico de tickets1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar ticket para evaluar": {
+      "main": [
+        [
+          {
+            "node": "Evaluar tickets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Asignar ticket actual": {
+      "main": [
+        [
+          {
+            "node": "Vista Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar Ticket para asignar": {
+      "main": [
+        [
+          {
+            "node": "Asignar ticket actual",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CSAT Pending Open": {
+      "main": [
+        [
+          {
+            "node": "Enviar WhatsApp CSAT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gracias CSAT Dinámico": {
+      "main": [
+        [
+          {
+            "node": "Enviar WhatsApp CSAT",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute: CSAT state": {
+      "main": [
+        [
+          {
+            "node": "Clasificar mensajes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lib: helpers": {
+      "main": [
+        [
+          {
+            "node": "Función: Parsear datos",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tiene ticket actual?": {
+      "main": [
+        [
+          {
+            "node": "Limpiar Ticket Actual",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Menu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar tecnicos disponible": {
+      "main": [
+        [
+          {
+            "node": "Buscar Tickets de esta Zona",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Asignar ticket actual1": {
+      "main": [
+        [
+          {
+            "node": "Agregar comentario",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear comentario Imagen1": {
+      "main": [
+        [
+          {
+            "node": "Crear comentario Imagen2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear comentario Imagen2": {
+      "main": [
+        [
+          {
+            "node": "Crear comentario Imagen",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Buscar CSAT temporal1": {
+      "main": [
+        [
+          {
+            "node": "Borrar CSAT temporal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Lib: helpers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp Trigger": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code1": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verificar Webhook": {
+      "main": [
+        [
+          {
+            "node": "Code1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "4d10e6a3-f450-4ecf-8e57-d4a3f9109e3e",
+  "meta": {
+    "instanceId": "186d2ae2457a16df5e2693ca154ccc6022c32e5e309daf2b971edbd4db221f64"
+  },
+  "id": "fjecuFmgXC6oxul4",
+  "tags": []
+}

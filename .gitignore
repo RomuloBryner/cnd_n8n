@@ -1,0 +1,24 @@
+# Variables de entorno
+.env
+
+# Datos de n8n
+n8n_data/
+
+# Workflows (opcional, si prefieres no versionar)
+# workflows/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
